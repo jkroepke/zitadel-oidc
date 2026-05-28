@@ -91,6 +91,11 @@ type HasUnauthorizedHandler interface {
 	UnauthorizedHandler() func(w http.ResponseWriter, r *http.Request, desc string, state string)
 }
 
+type HasJwtAudiences interface {
+	// GetJWTAudiences returns a function that returns the audiences to be used for the JWT Profile Client Authentication on the token endpoint.
+	GetJWTAudiences() []string
+}
+
 type ErrorHandler func(w http.ResponseWriter, r *http.Request, errorType string, errorDesc string, state string)
 type UnauthorizedHandler func(w http.ResponseWriter, r *http.Request, desc string, state string)
 
@@ -120,6 +125,7 @@ type relyingParty struct {
 	idTokenVerifier     *IDTokenVerifier
 	verifierOpts        []VerifierOption
 	signer              jose.Signer
+	jwtAudiences        JWTProfileAudiencesFn
 	logger              *slog.Logger
 }
 
@@ -186,6 +192,13 @@ func (rp *relyingParty) UnauthorizedHandler() func(http.ResponseWriter, *http.Re
 		rp.unauthorizedHandler = DefaultUnauthorizedHandler
 	}
 	return rp.unauthorizedHandler
+}
+
+func (rp *relyingParty) GetJWTAudiences() []string {
+	if rp.jwtAudiences == nil {
+		return []string{rp.oauthConfig.ClientID, rp.OAuthConfig().Endpoint.TokenURL}
+	}
+	return rp.jwtAudiences(rp)
 }
 
 func (rp *relyingParty) Logger(ctx context.Context) (logger *slog.Logger, ok bool) {
@@ -386,6 +399,15 @@ func WithJWTProfile(signerFromKey SignerFromKey) Option {
 			return err
 		}
 		rp.signer = signer
+		return nil
+	}
+}
+
+type JWTProfileAudiencesFn func(rp *relyingParty) []string
+
+func WithJWTProfileAudiences(fn JWTProfileAudiencesFn) Option {
+	return func(rp *relyingParty) error {
+		rp.jwtAudiences = fn
 		return nil
 	}
 }
@@ -608,7 +630,14 @@ func CodeExchangeHandler[C oidc.IDClaims](callback CodeExchangeCallback[C], rp R
 			rp.CookieHandler().DeleteCookie(w, pkceCode)
 		}
 		if rp.Signer() != nil {
-			assertion, err := client.SignedJWTProfileAssertion(rp.OAuthConfig().ClientID, []string{rp.Issuer(), rp.OAuthConfig().Endpoint.TokenURL}, time.Hour, rp.Signer())
+			var audience []string
+			if rpa, ok := rp.(HasJwtAudiences); ok {
+				audience = rpa.GetJWTAudiences()
+			} else {
+				audience = []string{rp.OAuthConfig().ClientID, rp.OAuthConfig().Endpoint.TokenURL}
+			}
+
+			assertion, err := client.SignedJWTProfileAssertion(rp.OAuthConfig().ClientID, audience, time.Hour, rp.Signer())
 			if err != nil {
 				unauthorizedError(w, r, "failed to build assertion: "+err.Error(), state, rp)
 				return
